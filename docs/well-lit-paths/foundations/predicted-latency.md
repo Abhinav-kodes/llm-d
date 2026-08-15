@@ -38,6 +38,10 @@ During the standard request flow:
 - vLLM endpoint processes the request, returns response to proxy
 - Proxy sends results to the training server, which uses samples to update the model
 
+## Observability
+
+Predicted latency routing makes scheduling decisions from an online-trained XGBoost model, so the signals that matter are the **gap between predicted and observed latency** and **SLO violations** rather than a single aggregate latency. The [Predicted Latency guide's Observability section](../../../guides/predicted-latency-routing/README.md#4-observability--troubleshooting) covers the key metrics and failure modes, backed by the shared [PromQL](../../operations/observability/promql.md#routing--load-balancing) and [metric](../../operations/observability/metrics.md#predicted-latency--slo) references.
+
 ## Further Reading
 
 - [Latency Predictor Architecture](../../architecture/advanced/latency-predictor.md) — plugin pipeline, ML model, scaling characteristics, metric reference.

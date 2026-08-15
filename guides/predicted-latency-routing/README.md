@@ -193,6 +193,34 @@ kubectl apply -n ${NAMESPACE} -k ${REPO_ROOT}/guides/optimized-baseline/modelser
 
 Follow [optimized-baseline → Enable monitoring](../optimized-baseline/README.md#3-optional-enable-monitoring) — the same steps apply since this guide reuses the same model server manifests.
 
+### 4. Observability & Troubleshooting
+
+Once monitoring is enabled, use the signals below to operate predicted latency routing. This section covers the metrics that matter **for this path** and how to read them; full metric definitions live in the [metric reference](../../docs/operations/observability/metrics.md) and ready-to-run queries in the [PromQL reference](../../docs/operations/observability/promql.md).
+
+This path replaces heuristic scoring with an **online-trained XGBoost predictor**: the EPP estimates TTFT and TPOT for every candidate endpoint and routes to the one with the lowest predicted latency, with an optional SLO layer on top (`x-llm-d-slo-ttft-ms` / `x-llm-d-slo-tpot-ms` headers). The model is only as good as its training signal, so most problems show up as a **gap between predicted and observed latency** — watch the two together rather than either alone.
+
+#### Key metrics for this path
+
+| Signal | Why it matters for predicted latency routing | Where to look |
+|--------|----------------------------------------------|---------------|
+| Predicted vs. observed latency (`llm_d_epp_request_predicted_ttft_seconds` / `llm_d_epp_request_ttft_seconds`, `llm_d_epp_request_predicted_tpot_seconds` / `llm_d_epp_request_streaming_tpot_seconds`) | The core accuracy check for this path. Persistent over-prediction under-utilizes the pool; under-prediction overloads endpoints | [Metrics → Predicted Latency & SLO](../../docs/operations/observability/metrics.md#predicted-latency--slo) |
+| SLO violations (`llm_d_epp_request_slo_violation_total`) | Only emitted when the SLO values file is used. A rising rate means requests are missing their TTFT/TPOT targets — the primary alert signal for this path | [Metrics → Predicted Latency & SLO](../../docs/operations/observability/metrics.md#predicted-latency--slo) |
+| Prediction duration (`llm_d_epp_request_ttft_prediction_duration_seconds`, `llm_d_epp_request_tpot_prediction_duration_seconds`) | The predictor sidecar runs on the request path; rising prediction times add directly to routing latency | [Metrics → Predicted Latency & SLO](../../docs/operations/observability/metrics.md#predicted-latency--slo) |
+| Per-pod load (`llm_d_epp_request_running`, `vllm:num_requests_running`) | Latency scoring should spread load to the fastest endpoint; a hot pod next to idle ones suggests predictions are stale | [PromQL → Routing & Load Balancing](../../docs/operations/observability/promql.md#routing--load-balancing) |
+| Routing decision latency (`llm_d_epp_plugin_duration_seconds`) | Rising scheduler latency with healthy model servers localizes the problem to the routing layer, not the pods | [PromQL → Routing & Load Balancing](../../docs/operations/observability/promql.md#routing--load-balancing) |
+| TTFT and ITL (`vllm:time_to_first_token_seconds`, `vllm:inter_token_latency_seconds`) | The ground truth the predictor trains on. Regressions here with accurate predictions point at the model servers | [Metrics → vLLM](../../docs/operations/observability/metrics.md#key-vllm-metrics) |
+
+> Note: the predictor assumes a **homogeneous pool** — mixed GPU types, model variants, or serving configs in the same pool produce inaccurate predictions (see the [well-lit path overview](../../well-lit-paths/foundations/predicted-latency.md)).
+
+#### Common failure modes
+
+- **Persistent gap between predicted and observed latency** — the training signal is stale. Check that traffic is actually reaching the training server (the model retrains continuously from observed samples) and that the pool is homogeneous; the predictor cannot compensate for a pool that changed shape.
+- **SLO violations climbing while load looks balanced** — if the SLO values file is in use, check the TTFT/TPOT violation labels on `llm_d_epp_request_slo_violation_total` to see which target is being missed, then compare predicted vs. observed for that signal.
+- **Hot endpoint next to idle ones** — predictions for the hot endpoint are too optimistic. Confirm prediction duration is not inflating routing latency and that per-endpoint scores track the observed TTFT/ITL.
+- **Latency regression with accurate predictions** — the model servers are the bottleneck, not the router. Check KV cache utilization and queue depth before touching routing config.
+
+For alert rules covering these signals, see [Alerting](../../docs/operations/observability/alerting.md).
+
 ## Send Requests
 
 Once enabled, latency-based scheduling works on every request — no header changes needed. The proxy picks the endpoint with the lowest predicted latency.
